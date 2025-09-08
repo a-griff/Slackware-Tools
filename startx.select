@@ -1,0 +1,132 @@
+#!/bin/bash
+#===============================================================================
+# Slackware X Session Selector (startx.select)
+#===============================================================================
+#
+# This helper script allows you to choose which desktop or window manager to
+# start when running startx from a console. It also supports setting a default
+# and starting it automatically after a timeout.
+#
+# Setup
+# -----
+# 1. Save this script as:  ~/bin/startx.select
+# 2. Make it executable:   chmod +x ~/bin/startx.select
+# 3. Make sure ~/bin is in your PATH. Add this to ~/.bash_profile if needed:
+#        export PATH="$HOME/bin:$PATH"
+#
+# Usage
+# -----
+# From a text console (outside of X), run:
+#
+#     startx.select
+#
+# You will see a menu like this:
+#
+#     Available window managers / desktops:
+#       1) xfce
+#       2) kde
+#       3) wmaker
+#
+#     Current default: xfce
+#     Press ENTER or wait 20 seconds to load the default.
+#     Or type 'd' to change the default.
+#     Choose session [1-3 / d]:
+#
+# Options
+# -------
+# - Press ENTER: Start the current default session.
+# - Wait 20 seconds: Default session will start automatically.
+# - Enter a number: Start that session once (does not change default).
+# - Enter 'd': Change and save the default session. The choice is stored in
+#   ~/.xsession.default
+#
+# Notes
+# -----
+# - The script reads available sessions from /etc/X11/xinit/xinitrc.*
+# - The default session is remembered across logins until changed.
+#
+#===============================================================================
+
+XINITDIR="/etc/X11/xinit"
+XINITRCS=($XINITDIR/xinitrc.*)
+DEFAULTFILE="$HOME/.xsession.default"
+TIMEOUT=20
+
+if [ ${#XINITRCS[@]} -eq 0 ]; then
+    echo "No xinitrc scripts found in $XINITDIR"
+    exit 1
+fi
+
+# Load saved default if present
+if [ -f "$DEFAULTFILE" ]; then
+    DEFAULT=$(<"$DEFAULTFILE")
+else
+    DEFAULT=""
+fi
+
+while true; do
+    echo "Available window managers / desktops:"
+    i=1
+    for script in "${XINITRCS[@]}"; do
+        base=$(basename "$script")
+        echo "  $i) ${base#xinitrc.}"
+        i=$((i+1))
+    done
+
+    echo
+    if [ -n "$DEFAULT" ]; then
+        echo "Current default: $DEFAULT"
+    else
+        echo "No default set"
+    fi
+    echo "Press ENTER or wait $TIMEOUT seconds to load the default."
+    echo "Or type 'd' to change the default."
+
+    # Read with timeout
+    read -rt $TIMEOUT -p "Choose session [1-${#XINITRCS[@]} / d]: " choice
+
+    # Timeout or blank input → start default
+    if [ -z "$choice" ]; then
+        if [ -n "$DEFAULT" ]; then
+            echo
+            echo "Starting default session: $DEFAULT"
+            exec startx "$XINITDIR/xinitrc.$DEFAULT" "$@"
+        else
+            echo
+            echo "No default set — please choose a session."
+            continue
+        fi
+    fi
+
+    # Change default
+    if [ "$choice" = "d" ]; then
+        echo
+        echo "Set new default session:"
+        j=1
+        for script in "${XINITRCS[@]}"; do
+            base=$(basename "$script")
+            echo "  $j) ${base#xinitrc.}"
+            j=$((j+1))
+        done
+        read -rp "Enter number: " newdef
+        if [[ "$newdef" =~ ^[0-9]+$ ]] && [ "$newdef" -ge 1 ] && [ "$newdef" -le ${#XINITRCS[@]} ]; then
+            newbase=$(basename "${XINITRCS[$((newdef-1))]}")
+            echo "${newbase#xinitrc.}" > "$DEFAULTFILE"
+            echo "Default set to ${newbase#xinitrc.}"
+            DEFAULT="${newbase#xinitrc.}"
+        else
+            echo "Invalid selection, default not changed."
+        fi
+        echo
+        continue
+    fi
+
+    # Numeric choice → start session
+    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#XINITRCS[@]} ]; then
+        exec startx "${XINITRCS[$((choice-1))]}" "$@"
+    fi
+
+    echo "Invalid choice."
+    echo
+done
+
