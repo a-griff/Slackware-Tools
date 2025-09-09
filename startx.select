@@ -1,78 +1,96 @@
 #!/bin/bash
 #===============================================================================
-# Slackware X Session Selector (startx.select)
+# Slackware X Session Selector — startx.select
 #===============================================================================
 #
-# This helper script allows you to choose which desktop or window manager to
-# start when running startx from a console. It also supports setting a default
-# and starting it automatically after a timeout.
-#
-# Setup
-# -----
-# 1. Save this script as:  ~/bin/startx.select
-# 2. Make it executable:   chmod +x ~/bin/startx.select
-# 3. Make sure ~/bin is in your PATH. Add this to ~/.bash_profile if needed:
-#        export PATH="$HOME/bin:$PATH"
-#
-# Usage
-# -----
-# From a text console (outside of X), run:
-#
-#     startx.select
-#
-# You will see a menu like this:
-#
-#     Available window managers / desktops:
-#       1) xfce
-#       2) kde
-#       3) wmaker
-#
-#     Current default: xfce
-#     Press ENTER or wait 20 seconds to load the default.
-#     Or type 'd' to change the default.
-#     Choose session [1-3 / d]:
-#
-# Options
-# -------
-# - Press ENTER: Start the current default session.
-# - Wait 20 seconds: Default session will start automatically.
-# - Enter a number: Start that session once (does not change default).
-# - Enter 'd': Change and save the default session. The choice is stored in
-#   ~/.xsession.default
-#
-# Notes
-# -----
-# - The script reads available sessions from /etc/X11/xinit/xinitrc.*
-# - The default session is remembered across logins until changed.
+# Features:
+#   - Lists /etc/X11/xinit/xinitrc.* entries
+#   - Remembers a default in ~/.xsession.default
+#   - ENTER or 20s timeout -> launches the default
+#   - "Set default" menu item
+#   - Uses dialog(1) if installed (unless NO_DIALOGS=yes is set)
+#   - In dialog mode, the "Start default" option is first & pre-selected
 #
 #===============================================================================
 
+set -euo pipefail
+
+#--- CONFIG --------------------------------------------------------------------
+NO_DIALOGS="no"       # set to "yes" to disable dialog menus, force text mode
 XINITDIR="/etc/X11/xinit"
-XINITRCS=($XINITDIR/xinitrc.*)
 DEFAULTFILE="$HOME/.xsession.default"
 TIMEOUT=20
 
+#--- Gather available sessions -------------------------------------------------
+mapfile -t XINITRCS < <(ls -1 "$XINITDIR"/xinitrc.* 2>/dev/null || true)
 if [ ${#XINITRCS[@]} -eq 0 ]; then
-    echo "No xinitrc scripts found in $XINITDIR"
+    echo "No xinitrc scripts found in $XINITDIR" >&2
     exit 1
 fi
 
-# Load saved default if present
-if [ -f "$DEFAULTFILE" ]; then
-    DEFAULT=$(<"$DEFAULTFILE")
-else
-    DEFAULT=""
-fi
+# names like xfce, kde, wmaker...
+SESSIONS=()
+for script in "${XINITRCS[@]}"; do
+    base=$(basename "$script")
+    SESSIONS+=("${base#xinitrc.}")
+done
 
-while true; do
-    echo "Available window managers / desktops:"
+#--- Load default ---------------------------------------------------------------
+DEFAULT=""
+[ -f "$DEFAULTFILE" ] && DEFAULT=$(<"$DEFAULTFILE")
+
+#--- Helpers -------------------------------------------------------------------
+launch_default() {
+    if [ -n "$DEFAULT" ] && printf '%s\n' "${SESSIONS[@]}" | grep -qx -- "$DEFAULT"; then
+        echo "Starting default session: $DEFAULT"
+        exec startx "$XINITDIR/xinitrc.$DEFAULT" "$@"
+    fi
+    return 1
+}
+
+set_default_text() {
+    echo "Set new default:"
     i=1
-    for script in "${XINITRCS[@]}"; do
-        base=$(basename "$script")
-        echo "  $i) ${base#xinitrc.}"
+    for s in "${SESSIONS[@]}"; do
+        echo "  $i) $s"
         i=$((i+1))
     done
+    read -rp "Enter number: " newdef
+    if [[ "$newdef" =~ ^[0-9]+$ ]] && [ "$newdef" -ge 1 ] && [ "$newdef" -le ${#SESSIONS[@]} ]; then
+        DEFAULT="${SESSIONS[$((newdef-1))]}"
+        printf '%s\n' "$DEFAULT" > "$DEFAULTFILE"
+        echo "Default set to: $DEFAULT"
+    else
+        echo "Invalid selection, default not changed."
+    fi
+}
 
+set_default_dialog() {
+    local items=() i=1
+    for s in "${SESSIONS[@]}"; do
+        items+=("$i" "$s")
+        i=$((i+1))
+    done
+    dialog --clear --no-tags --title "Set default session" \
+           --menu "Select a new default session:" 15 60 10 \
+           "${items[@]}" 2> "$TMP_OUT" || return 1
+    local idx
+    idx=$(<"$TMP_OUT")
+    if [[ "$idx" =~ ^[0-9]+$ ]] && [ "$idx" -ge 1 ] && [ "$idx" -le ${#SESSIONS[@]} ]; then
+        DEFAULT="${SESSIONS[$((idx-1))]}"
+        printf '%s\n' "$DEFAULT" > "$DEFAULTFILE"
+        dialog --clear --title "Default updated" --msgbox "Default set to: $DEFAULT" 7 50
+    fi
+}
+
+#--- Text menu version ----------------------------------------------------------
+text_menu() {
+    echo "Available window managers / desktops:"
+    i=1
+    for s in "${SESSIONS[@]}"; do
+        echo "  $i) $s"
+        i=$((i+1))
+    done
     echo
     if [ -n "$DEFAULT" ]; then
         echo "Current default: $DEFAULT"
@@ -82,51 +100,83 @@ while true; do
     echo "Press ENTER or wait $TIMEOUT seconds to load the default."
     echo "Or type 'd' to change the default."
 
-    # Read with timeout
-    read -rt $TIMEOUT -p "Choose session [1-${#XINITRCS[@]} / d]: " choice
+    read -rt $TIMEOUT -p "Choose session [1-${#SESSIONS[@]} / d]: " choice || true
 
-    # Timeout or blank input → start default
-    if [ -z "$choice" ]; then
-        if [ -n "$DEFAULT" ]; then
-            echo
-            echo "Starting default session: $DEFAULT"
-            exec startx "$XINITDIR/xinitrc.$DEFAULT" "$@"
-        else
-            echo
-            echo "No default set — please choose a session."
-            continue
+    if [ -z "${choice:-}" ]; then
+        launch_default "$@" || return 0
+    elif [ "$choice" = "d" ]; then
+        set_default_text
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#SESSIONS[@]} ]; then
+        exec startx "$XINITDIR/xinitrc.${SESSIONS[$((choice-1))]}" "$@"
+    fi
+}
+
+#--- Dialog menu version --------------------------------------------------------
+dialog_menu() {
+    TMP_OUT=$(mktemp)
+    trap 'rm -f "$TMP_OUT"' EXIT
+
+    local defline="No default set"
+    [ -n "$DEFAULT" ] && defline="Current default: $DEFAULT"
+
+    # Build menu items with the DEFAULT option first (tag "0")
+    local items=()
+    if [ -n "$DEFAULT" ]; then
+        items+=("0" "Start default: $DEFAULT")
+    else
+        items+=("0" "Start default: (not set) — choose 'd' to set")
+    fi
+
+    # Then the real sessions
+    local i=1
+    for s in "${SESSIONS[@]}"; do
+        items+=("$i" "$s")
+        i=$((i+1))
+    done
+    # And the 'd' option
+    items+=("d" "Set default session")
+
+    dialog --clear --timeout "$TIMEOUT" \
+           --title "Slackware X session chooser" \
+           --backtitle "$defline • ENTER or ${TIMEOUT}s = start default" \
+           --default-item "0" \
+           --menu "Choose a session:\n\n$defline" 18 72 12 \
+           "${items[@]}" 2> "$TMP_OUT"
+
+    local status=$?
+    local choice=""
+    [ -s "$TMP_OUT" ] && choice=$(<"$TMP_OUT")
+
+    # Timeout or ESC/Cancel -> try default (auto-boot behavior)
+    if [ "$status" -ne 0 ] || [ -z "$choice" ]; then
+        launch_default "$@" || return 0
+    fi
+
+    # Explicit selection handling
+    if [ "$choice" = "0" ]; then
+        # User hit ENTER on preselected default item
+        if ! launch_default "$@"; then
+            dialog --clear --title "No default set" \
+                   --msgbox "No valid default is configured.\nPick 'd' to set one." 7 56
         fi
+        return 0
+    elif [ "$choice" = "d" ]; then
+        set_default_dialog
+        return 0
+    elif [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#SESSIONS[@]} ]; then
+        local sess="${SESSIONS[$((choice-1))]}"
+        dialog --clear
+        exec startx "$XINITDIR/xinitrc.$sess" "$@"
     fi
 
-    # Change default
-    if [ "$choice" = "d" ]; then
-        echo
-        echo "Set new default session:"
-        j=1
-        for script in "${XINITRCS[@]}"; do
-            base=$(basename "$script")
-            echo "  $j) ${base#xinitrc.}"
-            j=$((j+1))
-        done
-        read -rp "Enter number: " newdef
-        if [[ "$newdef" =~ ^[0-9]+$ ]] && [ "$newdef" -ge 1 ] && [ "$newdef" -le ${#XINITRCS[@]} ]; then
-            newbase=$(basename "${XINITRCS[$((newdef-1))]}")
-            echo "${newbase#xinitrc.}" > "$DEFAULTFILE"
-            echo "Default set to ${newbase#xinitrc.}"
-            DEFAULT="${newbase#xinitrc.}"
-        else
-            echo "Invalid selection, default not changed."
-        fi
-        echo
-        continue
-    fi
+    return 0
+}
 
-    # Numeric choice → start session
-    if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#XINITRCS[@]} ]; then
-        exec startx "${XINITRCS[$((choice-1))]}" "$@"
-    fi
-
-    echo "Invalid choice."
-    echo
-done
-
+#--- Main -----------------------------------------------------------------------
+if [ "$NO_DIALOGS" = "yes" ]; then
+    while true; do text_menu "$@"; done
+elif command -v dialog >/dev/null 2>&1; then
+    while true; do dialog_menu "$@"; done
+else
+    while true; do text_menu "$@"; done
+fi
